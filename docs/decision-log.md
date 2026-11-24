@@ -45,3 +45,7 @@ Goal: test whether Differential Attention (Ye et al. 2024) still beats a standar
 - Unit tests: RMSNorm/lambda forced float32, breaking float64 gradcheck -> promote to >= float32.
 - Mutation check: 4 hand-made DiffAttn-core mutations (lambda scale, swapped a2 halves, swapped v
   halves, non-causal) were each caught by >= 2 unit tests.
+- CPU smoke: a 20-step run paused (checkpoint + PAUSED) and resumed to 40 steps reproduced the
+  uninterrupted 40-step run bit-for-bit (train loss, val loss, lr, lambdas at every log step).
+- CPU smoke: evals.py crashed when the needle prompt (900 tokens) exceeded a 64-token smoke model's
+  context -> probe length = min(900, 0.88 * seq_len); the real runs (seq 1024) use 900.

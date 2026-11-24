@@ -145,7 +145,7 @@ def main():
         out[task] = score(m, items, device)
         print(task, out[task], flush=True)
     val = np.memmap(os.path.join(a.data_dir, "val.bin"), dtype=np.uint16, mode="r")
-    out["needle"] = needle_probe(m, val, device)
+    out["needle"] = needle_probe(m, val, device, ctx_len=min(900, int(0.88 * m.cfg.seq_len)))
     print("needle", {k: v for k, v in out["needle"].items() if "per_layer" not in k}, flush=True)
     json.dump(out, open(os.path.join(a.run, "evals.json"), "w"), indent=1)
 
