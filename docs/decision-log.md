@@ -54,3 +54,7 @@ Goal: test whether Differential Attention (Ye et al. 2024) still beats a standar
   15 fake runs with a planted effect (G=0.05, R=0.8, seed sd 0.005) and one DIVERGED std run. After
   re-applying: G=0.055 [0.050, 0.062], R=0.73 [0.62, 0.81] (covers 0.8), diverged run excluded and
   listed, paired test on the 4 common seeds (16 sign patterns).
+- Stage A logic test (fake lane runner, planted sweep optima, simulated OOM at micro_bs 16 for std):
+  micro_bs fallback to 8 worked, budget filled exactly 8.0 h for the slower lane, the edge rule
+  extended std down (5e-4) and diff up (8e-3), and LR selection returned the planted optima. The CPU
+  dry run with real tiny training completed the pilot stage (all three arms reached step 60, rc 0).
