@@ -3,7 +3,7 @@
   python orchestrate.py A <out_dir> <main_hours>
       unit tests + GPU parity -> throughput pilot per arm -> pre-registered budget formula ->
       LR sweep (+ edge extension) -> LR selection. Writes budget.json, sweep.json.
-  python orchestrate.py B <out_dir> <budget.json> <sweep.json> <seeds>
+  python orchestrate.py B <out_dir> <budget.json> <sweep.json> <arch:seed,arch:seed,...>
       main runs (best LR per arm, given seeds, full budget) with evals.
 
 Budget formula (pre-registered in docs/prereg.md, amendment 1): choose main steps S so that the
@@ -190,12 +190,13 @@ def stage_a(out, main_hours):
         assert math.isfinite(res[a][best[a]]), f"no finished sweep run for {a}"
 
 
-def stage_b(out, budget_path, sweep_path, seeds):
+def stage_b(out, budget_path, sweep_path, runs):
+    """runs: list of (arch, seed) to run in this session (main runs may be split across sessions)."""
     budget, sw = json.load(open(budget_path)), json.load(open(sweep_path))
     S, mb, tps = budget["main_steps"], budget["micro_bs"], budget["pilot_tok_per_s"]
     jobs = [{"name": f"main_{a}_s{s}", "arch": a, "evals": True,
              "args": COMMON + ["--arch", a, "--lr", sw["best_lr"][a], "--seed", s, "--micro_bs", mb[a],
-                               "--max_steps", S]} for s in seeds for a in ARMS]
+                               "--max_steps", S]} for a, s in runs]
     lanes, load = balance(jobs, lambda j: 1 / tps[j["arch"]])
     log("lanes", [[j["name"] for j in l] for l in lanes])
     run_lanes(lanes, os.path.join(out, "main"))
@@ -205,4 +206,5 @@ if __name__ == "__main__":
     if sys.argv[1] == "A":
         stage_a(sys.argv[2], float(sys.argv[3]))
     else:
-        stage_b(sys.argv[2], sys.argv[3], sys.argv[4], [int(x) for x in sys.argv[5].split(",")])
+        stage_b(sys.argv[2], sys.argv[3], sys.argv[4],
+                [(x.split(":")[0], int(x.split(":")[1])) for x in sys.argv[5].split(",")])
