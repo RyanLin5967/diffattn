@@ -1,0 +1,25 @@
+{
+ "main_steps": 1800,
+ "main_tokens": 117964800,
+ "sweep_steps": 450,
+ "micro_bs": {
+  "std": 16,
+  "qknorm": 16,
+  "diff": 16
+ },
+ "pilot_tok_per_s": {
+  "std": 45325.17232353462,
+  "qknorm": 40784.14449471876,
+  "diff": 38267.74980165891
+ },
+ "pilot_mfu": {
+  "std": 0.250338742197211,
+  "qknorm": 0.22525786248573937,
+  "diff": 0.22617537232878307
+ },
+ "per_run_fixed_s": 518.2574887275696,
+ "eval_s": 360.002507686615,
+ "main_hours": 8.0,
+ "predicted_main_lane_hours": 7.695128539721171,
+ "stage_a_elapsed_s": 856.692348241806
+}
