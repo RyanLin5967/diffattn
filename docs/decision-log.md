@@ -58,3 +58,18 @@ Goal: test whether Differential Attention (Ye et al. 2024) still beats a standar
   micro_bs fallback to 8 worked, budget filled exactly 8.0 h for the slower lane, the edge rule
   extended std down (5e-4) and diff up (8e-3), and LR selection returned the planted optima. The CPU
   dry run with real tiny training completed the pilot stage (all three arms reached step 60, rc 0).
+
+## 2026-11-24 — stage A result (raw outputs in runs/stageA/)
+- Pilot on T4 (fp16, micro_bs 16 fit for all arms): std 45.3k tok/s (MFU 25%), qknorm 40.8k (23%),
+  diff 38.3k (23%). Fixed overhead per run 518 s + evals 360 s.
+- Pre-registered formula -> main_steps 1800 (117.96M tokens/run), sweep 450 steps; predicted slower
+  lane 7.7 h for all 15 main runs on one session.
+- Sweep (seed 100, 450 steps, final full val loss): no fp16 overflow skips in any run, loss scale
+  constant. Lower LRs won in every arm, so the pre-registered edge rule added 5e-4 for all three arms.
+  Best: std 1e-3 (5.308), qknorm 5e-4 (5.457), diff 1e-3 (5.718). qknorm's grid is non-monotonic
+  (1e-3 5.475, 2e-3 5.667, 4e-3 5.519): single-seed sweep noise, reported as a limitation; the
+  edge rule allows one extension only and qknorm's best (5e-4) is again on the edge.
+- Main runs split into two Kaggle sessions (8 + 7 runs) to halve wall-clock; same steps and LRs.
+  Kaggle allows 2 concurrent GPU sessions per account and another project's kernels held both slots,
+  so the pushes are queued and retried until a slot frees. The weekly free GPU quota is shared with
+  that project (remaining quota is not visible through the API).
