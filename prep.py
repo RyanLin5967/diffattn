@@ -48,21 +48,24 @@ def jl(url):
     return [json.loads(x) for x in r.text.splitlines() if x.strip()]
 
 
+def pq_rows(repo, fname):
+    p = hf_hub_download(repo, fname, repo_type="dataset", local_dir="/tmp/hf_evals")
+    return pq.read_table(p).to_pylist()
+
+
 def evals(out):
-    from datasets import load_dataset
     enc = tiktoken.get_encoding("gpt2")
     E = lambda s: enc.encode_ordinary(s)  # noqa: E731
     os.makedirs(os.path.join(out, "evals"), exist_ok=True)
     tasks = {}
 
-    hs = jl("https://raw.githubusercontent.com/rowanz/hellaswag/master/data/hellaswag_val.jsonl")
+    hs = pq_rows("Rowan/hellaswag", "data/validation-00000-of-00001.parquet")
     tasks["hellaswag"] = [dict(ctx=E(x["ctx"]), conts=[E(" " + e) for e in x["endings"]], label=int(x["label"]))
                           for x in hs]
 
-    arc = load_dataset("allenai/ai2_arc", "ARC-Easy", split="test")
     items = []
-    for x in arc:
-        labels = x["choices"]["label"]
+    for x in pq_rows("allenai/ai2_arc", "ARC-Easy/test-00000-of-00001.parquet"):
+        labels = list(x["choices"]["label"])
         if x["answerKey"] not in labels:
             continue
         items.append(dict(ctx=E(f"Question: {x['question']}\nAnswer:"),
@@ -75,9 +78,8 @@ def evals(out):
     tasks["piqa"] = [dict(ctx=E(f"Question: {x['goal']}\nAnswer:"), conts=[E(" " + x["sol1"]), E(" " + x["sol2"])],
                           label=int(lab)) for x, lab in zip(pv, pl)]
 
-    lam = load_dataset("EleutherAI/lambada_openai", "default", split="test")
     items = []
-    for x in lam:
+    for x in pq_rows("EleutherAI/lambada_openai", "default/test/default.parquet"):
         ctx, word = x["text"].rsplit(" ", 1)
         items.append(dict(ctx=E(ctx), conts=[E(" " + word)], label=0))
     tasks["lambada"] = items
@@ -91,7 +93,9 @@ def evals(out):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
+    ap.add_argument("--evals_only", action="store_true")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
+    if not a.evals_only:
+        tok_parquet(a.out)
     evals(a.out)
-    tok_parquet(a.out)
