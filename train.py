@@ -45,6 +45,7 @@ def get_args():
     p.add_argument("--val_tokens", type=int, default=20_000_000)
     p.add_argument("--ckpt_every", type=int, default=2000)
     p.add_argument("--compile", type=int, default=1)
+    p.add_argument("--deadline", type=float, default=0, help="unix time; checkpoint + PAUSED and exit when passed")
     p.add_argument("--dtype", default="bf16", choices=["bf16", "fp16"])
     p.add_argument("--d_model", type=int, default=512)
     p.add_argument("--n_layer", type=int, default=8)
@@ -183,12 +184,16 @@ def main():
 
     t0, tok_since = time.time(), 0
     loss_acc = torch.zeros((), device=device)
+    n_ok = torch.zeros((), device=device)  # steps in this log window whose loss was finite
+    n_win = 0  # steps in this log window
     diverged = False
+    hit_deadline = False
     while step < max_steps:
         lr = lr_at(step, sched, a.lr, a.warmup_frac, a.final_lr_frac)
         for g in opt.param_groups:
             g["lr"] = lr
         base = step * per_step
+        step_loss = torch.zeros((), device=device)
         for m in range(accum):
             x, y = data.batch(base + (m * world + rank) * a.micro_bs, a.micro_bs)
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
@@ -197,21 +202,30 @@ def main():
             with torch.autocast(dev_type, dtype=amp_dtype):
                 loss = model(x, y) / accum
             scaler.scale(loss).backward()
-            loss_acc += loss.detach()
+            step_loss += loss.detach()
         scaler.unscale_(opt)
         gn = torch.nn.utils.clip_grad_norm_(raw.parameters(), a.clip)
         scaler.step(opt)
         scaler.update()
         opt.zero_grad(set_to_none=True)
         step += 1
+        n_win += 1
         tok_since += a.batch_tokens
+        fin = torch.isfinite(step_loss)  # fp16: an overflowed step is skipped by GradScaler, not fatal
+        loss_acc += torch.where(fin, step_loss, torch.zeros_like(step_loss))
+        n_ok += fin.float()
 
         last = step == max_steps
         if step % a.log_every == 0 or last:
             if ddp:
                 dist.all_reduce(loss_acc)
-            train_loss = loss_acc.item() / (world * (step % a.log_every or a.log_every))
+                dist.all_reduce(n_ok)
+            ok = n_ok.item()
+            train_loss = loss_acc.item() / ok if ok > 0 else float("nan")
+            skipped = n_win * world - ok
             loss_acc.zero_()
+            n_ok.zero_()
+            n_win = 0
             if cuda:
                 torch.cuda.synchronize()
             dt = time.time() - t0
@@ -221,20 +235,30 @@ def main():
                               world, device, dev_type, amp_dtype)
             rec = dict(step=step, tokens=step * a.batch_tokens, lr=lr, train_loss=train_loss, grad_norm=gn.item(),
                        tok_per_s=tps, mfu=tps * fpt / (world * peak),
-                       hw_mfu=tps * hwfpt / (world * peak), loss_scale=scaler.get_scale(), lambdas=raw.lambdas())
+                       hw_mfu=tps * hwfpt / (world * peak), loss_scale=scaler.get_scale(),
+                       nonfinite_steps=skipped, lambdas=raw.lambdas())
             rec["val_loss_full" if full else "val_loss_2m"] = vl
             rec["val_windows"] = vwin
-            diverged = not math.isfinite(train_loss)
+            # diverged: no finite step in the window, non-finite val loss, or fp16 loss scale collapsed
+            diverged = (not math.isfinite(train_loss)) or (not math.isfinite(vl)) or \
+                (a.dtype == "fp16" and scaler.get_scale() < 1.0)
             if diverged:
                 rec["diverged"] = True
             log(rec)
             if diverged:
                 break
             t0, tok_since = time.time(), 0
+        if a.deadline and not last:
+            flag = torch.tensor(float(time.time() > a.deadline), device=device)
+            if ddp:
+                dist.all_reduce(flag, op=dist.ReduceOp.MAX)  # all ranks stop on the same step
+            if flag.item() > 0:
+                hit_deadline = True
+                break
         if rank == 0 and (step % a.ckpt_every == 0) and not last:
             torch.save({"model": raw.state_dict(), "opt": opt.state_dict(), "scaler": scaler.state_dict(), "step": step}, ck + ".tmp")
             os.replace(ck + ".tmp", ck)
-    if rank == 0 and not diverged and step < sched:
+    if rank == 0 and not diverged and (step < sched or hit_deadline):
         # partial run (e.g. throughput pilot): leave a resumable checkpoint, do not mark DONE
         torch.save({"model": raw.state_dict(), "opt": opt.state_dict(), "scaler": scaler.state_dict(), "step": step}, ck + ".tmp")
         os.replace(ck + ".tmp", ck)

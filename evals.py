@@ -97,11 +97,12 @@ NAMES = ["Alice", "Bruno", "Chen", "Dara", "Elif", "Farid", "Gita", "Hugo", "Ine
 def needle_probe(m, val, device, n=200, ctx_len=900):
     """Key-retrieval prompt: filler from held-out val text, one needle sentence at a random depth, then
     the query. Measures (head-avg, per layer) effective attention mass of the final position on the
-    needle's number tokens ('answer') vs all other context tokens excluding the first token and the
-    query ('noise'), and greedy retrieval accuracy of the first number token."""
+    needle's number tokens ('answer') vs all other context tokens excluding the first token, the needle
+    sentence and the query ('noise'); the scale-free answer share |answer| / (|answer| + |noise|) is the
+    cross-arm comparison (DiffAttn rows sum to 1 - lambda, not 1); plus greedy retrieval accuracy."""
     enc = tiktoken.get_encoding("gpt2")
     rng = np.random.default_rng(1234)  # identical probe set for every run
-    ans_mass, noise_mass, hits = [], [], 0
+    ans_mass, noise_mass, neg_mass, row_total, hits = [], [], [], [], 0
     for t in range(n):
         name = NAMES[t % len(NAMES)]
         num = str(rng.integers(1000, 9999))
@@ -119,17 +120,23 @@ def needle_probe(m, val, device, n=200, ctx_len=900):
         T = len(toks)
         mask_noise = torch.ones(T, dtype=torch.bool, device=device)
         mask_noise[0] = False
-        mask_noise[apos] = False
+        mask_noise[d:d + len(needle)] = False  # whole needle sentence (key + answer) is not noise
         mask_noise[T - len(query):] = False
         ans_mass.append(att[:, apos].sum(1).cpu().numpy())
         noise_mass.append(att[:, mask_noise].sum(1).cpu().numpy())
+        neg_mass.append(att.clamp(max=0).sum(1).cpu().numpy())  # DiffAttn maps can go negative
+        row_total.append(att.sum(1).cpu().numpy())  # 1 for softmax, 1 - lambda for DiffAttn
         with torch.autocast(DEV, dtype=AMP):
             pred = m(idx)[0, -1].argmax().item()
         hits += int(pred == numtok[0])
     am, nm = np.mean(ans_mass, 0), np.mean(noise_mass, 0)
+    A, N = np.array(ans_mass), np.array(noise_mass)
+    share = np.mean(A / np.maximum(np.abs(A) + np.abs(N), 1e-9), 0)  # scale-free: comparable across arms
     return dict(n=n, ctx_len=ctx_len, retrieval_acc=hits / n, answer_mass_per_layer=am.tolist(),
                 noise_mass_per_layer=nm.tolist(), answer_mass_mean=float(am.mean()),
-                noise_mass_mean=float(nm.mean()))
+                noise_mass_mean=float(nm.mean()), answer_share_per_layer=share.tolist(),
+                answer_share_mean=float(share.mean()), neg_mass_per_layer=np.mean(neg_mass, 0).tolist(),
+                row_total_per_layer=np.mean(row_total, 0).tolist())
 
 
 def main():

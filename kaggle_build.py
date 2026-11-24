@@ -16,7 +16,8 @@ import tarfile
 
 USER = "ryanlin5967"
 ROOT = os.path.dirname(os.path.abspath(__file__))
-FILES = ["model.py", "train.py", "evals.py", "prep.py", "tests/test_diffattn.py", "tests/gpu_parity.py"]
+FILES = ["model.py", "train.py", "evals.py", "prep.py", "orchestrate.py", "tests/test_diffattn.py", "tests/gpu_parity.py"]
+EXTRA = ["results/budget.json", "results/sweep.json"]  # included when present (stage B)
 DATA_KERNEL = f"{USER}/diffattn-data-prep"
 
 RUNNER = r'''
@@ -42,6 +43,11 @@ for f in os.listdir(d):
     p = os.path.join(d, f)
     (shutil.copytree if os.path.isdir(p) else shutil.copy)(p, os.path.join("/tmp/data", f))
 print("data:", os.listdir("/tmp/data"), flush=True)
+if JOB["kind"] == "cmd":
+    rc = sh(JOB["cmd"] + f" 2>&1 | tee {OUT}/orchestrate.log; exit ${{PIPESTATUS[0]}}", executable="/bin/bash")
+    for p in glob.glob(f"{OUT}/**/final.pt", recursive=True):
+        os.remove(p)  # keep kernel output small; evals already ran in-session
+    sys.exit(rc)
 status = {"pre": []}
 for c in JOB.get("pre", []):
     status["pre"].append({"cmd": c, "rc": sh(c)})
@@ -80,7 +86,7 @@ print("ALL DONE", status, flush=True)
 def code_b64():
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as t:
-        for f in FILES:
+        for f in FILES + [e for e in EXTRA if os.path.exists(os.path.join(ROOT, e))]:
             t.add(os.path.join(ROOT, f), arcname=f)
     return base64.b64encode(buf.getvalue()).decode()
 
@@ -99,7 +105,10 @@ def build(slug, title, job, gpu, sources):
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "prep":
+    if sys.argv[1] == "stage":
+        slug, cmd = sys.argv[2], sys.argv[3]
+        build(slug, slug, {"kind": "cmd", "cmd": cmd}, True, [DATA_KERNEL])
+    elif sys.argv[1] == "prep":
         build("diffattn-data-prep", "diffattn data prep", {"kind": "prep"}, False, [])
     else:
         plan = json.load(open(sys.argv[2]))

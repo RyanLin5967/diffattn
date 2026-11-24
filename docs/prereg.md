@@ -39,3 +39,22 @@ token budget. FLOPs/token reported for both (DiffAttn attention costs 1.5x).
 Filled in from the T4 pilot measurement before the sweep starts (amendment 1).
 
 ## Amendments
+
+### Amendment 1 (2026-11-24, before any GPU run): token budget formula
+Main steps S (batch 65,536 tokens) = the largest multiple of 100 such that the slower of the two T4
+lanes finishes all 15 main runs within 8.0 hours, using the measured pilot throughput per arm (60
+steps, steps 40-60), +4% for periodic small-val evals, plus a measured fixed overhead per run
+(startup + compile + final evals). Sweep runs use S // 4 steps. Computed automatically in
+`orchestrate.py` stage A and written to `budget.json`; micro-batch 16 per arm, 8 if 16 fails.
+
+### Amendment 2 (2026-11-24, before any GPU run): failed runs and fp16
+- fp16 (T4): a step whose loss overflows is skipped by GradScaler and excluded from the logged train
+  loss average (count logged as `nonfinite_steps`). A run is DIVERGED if a log window has no finite
+  step, the val loss is non-finite, or the loss scale falls below 1.
+- Diverged main runs are reported per arm and excluded from the loss tests: Welch uses each arm's
+  finished runs; the paired test uses seeds finished in both arms; the bootstrap resamples seeds
+  finished in all three arms. They are not rerun or replaced.
+- Needle probe cross-arm comparison uses the scale-free answer share |answer|/(|answer|+|noise|),
+  because DiffAttn rows sum to 1 - lambda; the whole needle sentence is excluded from noise.
+- Recovery R = Q/G is reported with paired-seed bootstrap CIs for G and Q separately; the CI of R is
+  conditional on G > 0 and labelled as such, with the fraction of resamples where G > 0.
