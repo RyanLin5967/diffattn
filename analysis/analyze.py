@@ -18,7 +18,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def load_run(d):
-    log = [json.loads(l) for l in open(os.path.join(d, "log.jsonl"))]
+    recs = {}
+    for l in open(os.path.join(d, "log.jsonl")):  # a resumed run may re-log steps: keep the last record
+        r = json.loads(l)
+        recs[r["step"]] = r
+    log = [recs[k] for k in sorted(recs)]
     meta = json.load(open(os.path.join(d, "meta_from0.json")))
     full = [r for r in log if "val_loss_full" in r]
     ev = os.path.join(d, "evals.json")
@@ -87,14 +91,20 @@ def sweep(root):
 def main(root):
     rs = runs(root, "main_")
     by = {a: sorted([r for r in rs if r["meta"]["arch"] == a], key=lambda r: r["meta"]["seed"]) for a in ARMS}
-    bad = [r["name"] for r in rs if not r["done"]]
-    if bad:
-        sys.exit(f"REFUSE: unfinished/diverged main runs: {bad}")
-    seeds = {a: [r["meta"]["seed"] for r in by[a]] for a in ARMS}
-    assert seeds["std"] == seeds["qknorm"] == seeds["diff"], seeds
-    v = {a: np.array([r["final_val"] for r in by[a]]) for a in ARMS}
+    unfinished = [r["name"] for r in rs if not r["done"] and not r["diverged"]]
+    if unfinished:
+        sys.exit(f"REFUSE: unfinished main runs: {unfinished}")
+    failed = {a: [r["meta"]["seed"] for r in by[a] if r["diverged"]] for a in ARMS}
+    # pre-registered (prereg amendment 2): diverged runs are reported per arm and excluded from the loss
+    # tests; Welch uses each arm's finished runs, the paired test uses seeds finished in both arms.
+    ok = {a: {r["meta"]["seed"]: r for r in by[a] if r["done"] and not r["diverged"]} for a in ARMS}
+    v = {a: np.array([ok[a][s]["final_val"] for s in sorted(ok[a])]) for a in ARMS}
+    by = {a: [ok[a][s] for s in sorted(ok[a])] for a in ARMS}
+    seeds = {a: sorted(ok[a]) for a in ARMS}
+    if any(len(v[a]) < 2 for a in ARMS):
+        sys.exit(f"REFUSE: fewer than 2 finished runs in some arm: {seeds}")
     m0 = by["std"][0]["meta"]
-    res = dict(n_seeds=len(seeds["std"]), seeds=seeds["std"],
+    res = dict(seeds_finished=seeds, failed_runs=failed,
                setup=dict(n_params={a: by[a][0]["meta"]["n_params"] for a in ARMS},
                           flops_per_token={a: by[a][0]["meta"]["flops_per_token"] for a in ARMS},
                           hw_flops_per_token={a: by[a][0]["meta"]["hw_flops_per_token"] for a in ARMS},
@@ -104,24 +114,34 @@ def main(root):
                per_arm={a: dict(vals=v[a].tolist(), mean=float(v[a].mean()), sd=float(v[a].std(ddof=1)))
                         for a in ARMS})
     pairs = [("std", "diff"), ("std", "qknorm"), ("qknorm", "diff")]
-    res["tests"] = {f"{a}-{b}": dict(welch=welch(v[a], v[b]), paired_perm=paired_perm(v[a], v[b]),
-                                     mde_80pct_power=mde(v[a].std(ddof=1), v[b].std(ddof=1), len(v[a])))
+    def paired(a, b):
+        common = sorted(set(seeds[a]) & set(seeds[b]))
+        return paired_perm([ok[a][s]["final_val"] for s in common], [ok[b][s]["final_val"] for s in common])
+    res["tests"] = {f"{a}-{b}": dict(welch=welch(v[a], v[b]), paired_perm=paired(a, b),
+                                     mde_80pct_power=mde(v[a].std(ddof=1), v[b].std(ddof=1),
+                                                         min(len(v[a]), len(v[b]))))
                     for a, b in pairs}
     gain = v["std"].mean() - v["diff"].mean()
     rec = (v["std"].mean() - v["qknorm"].mean()) / gain if gain != 0 else float("nan")
-    # seed-bootstrap CI for the recovery fraction (resample seeds independently per arm)
+    # paired seed bootstrap (seeds share data order across arms): resample seed indices jointly, keep every
+    # resample; percentile CIs of the gain G and of the qknorm gain Q, and of R = Q/G conditional on G > 0
+    common = sorted(set(seeds["std"]) & set(seeds["qknorm"]) & set(seeds["diff"]))
+    M = {a: np.array([ok[a][s]["final_val"] for s in common]) for a in ARMS}
     rng = np.random.default_rng(0)
-    boots = []
+    G, Q = [], []
     for _ in range(20000):
-        s = {a: rng.choice(v[a], len(v[a])).mean() for a in ARMS}
-        g = s["std"] - s["diff"]
-        if g > 0:
-            boots.append((s["std"] - s["qknorm"]) / g)
+        ix = rng.integers(0, len(common), len(common))
+        G.append(M["std"][ix].mean() - M["diff"][ix].mean())
+        Q.append(M["std"][ix].mean() - M["qknorm"][ix].mean())
+    G, Q = np.array(G), np.array(Q)
+    pct = lambda x: [float(np.percentile(x, 2.5)), float(np.percentile(x, 97.5))]  # noqa: E731
+    boots = Q[G > 0] / G[G > 0]
     res["diffattn_gain_over_std"] = float(gain)
     res["qknorm_recovery_frac"] = float(rec)
-    res["qknorm_recovery_boot95"] = [float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))] \
-        if len(boots) > 1000 else None
-    res["boot_frac_gain_positive"] = len(boots) / 20000
+    res["gain_boot95"] = pct(G)
+    res["qknorm_gain_boot95"] = pct(Q)
+    res["qknorm_recovery_boot95_given_gain_pos"] = pct(boots) if len(boots) > 1000 else None
+    res["boot_frac_gain_positive"] = float((G > 0).mean())
     # downstream + needle
     tasks = ["hellaswag", "arc_easy", "piqa", "lambada"]
     ds = {}
@@ -133,6 +153,9 @@ def main(root):
                                               for e in evs])),
                          sd=float(np.std([e[t]["acc_norm" if t in ("hellaswag", "arc_easy") else "acc"]
                                           for e in evs], ddof=1))) for t in tasks}
+        ds[a]["needle_answer_share"] = float(np.mean([e["needle"]["answer_share_mean"] for e in evs]))
+        ds[a]["needle_answer_share_per_layer"] = np.mean([e["needle"]["answer_share_per_layer"] for e in evs],
+                                                         0).tolist()
         ds[a]["needle_answer_mass"] = float(np.mean([e["needle"]["answer_mass_mean"] for e in evs]))
         ds[a]["needle_noise_mass"] = float(np.mean([e["needle"]["noise_mass_mean"] for e in evs]))
         ds[a]["needle_retrieval_acc"] = float(np.mean([e["needle"]["retrieval_acc"] for e in evs]))
@@ -144,7 +167,7 @@ def main(root):
     json.dump(res, open(os.path.join(HERE, "results.json"), "w"), indent=1)
     figures(by)
     print(json.dumps({k: res[k] for k in ("per_arm", "tests", "diffattn_gain_over_std", "qknorm_recovery_frac",
-                                          "qknorm_recovery_boot95")}, indent=1))
+                                          "gain_boot95", "qknorm_recovery_boot95_given_gain_pos")}, indent=1))
 
 
 def figures(by):

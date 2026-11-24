@@ -49,3 +49,8 @@ Goal: test whether Differential Attention (Ye et al. 2024) still beats a standar
   uninterrupted 40-step run bit-for-bit (train loss, val loss, lr, lambdas at every log step).
 - CPU smoke: evals.py crashed when the needle prompt (900 tokens) exceeded a 64-token smoke model's
   context -> probe length = min(900, 0.88 * seq_len); the real runs (seq 1024) use 900.
+- The first attempt at the analysis fixes silently did not apply (a preceding `grep -c` returning 0
+  short-circuited the `&&` chain) and the old analyze.py was committed. Caught by a synthetic test:
+  15 fake runs with a planted effect (G=0.05, R=0.8, seed sd 0.005) and one DIVERGED std run. After
+  re-applying: G=0.055 [0.050, 0.062], R=0.73 [0.62, 0.81] (covers 0.8), diverged run excluded and
+  listed, paired test on the 4 common seeds (16 sign patterns).
