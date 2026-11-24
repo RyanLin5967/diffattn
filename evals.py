@@ -12,6 +12,10 @@ import torch.nn.functional as F
 
 from model import GPT, GPTConfig, apply_rope
 
+DEV = "cuda" if torch.cuda.is_available() else "cpu"
+# bf16 on CPU and on sm80+; fp16 on older GPUs (Kaggle T4)
+AMP = torch.bfloat16 if DEV == "cpu" or torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+
 
 def load(run, device):
     st = torch.load(os.path.join(run, "final.pt"), map_location=device)
@@ -36,7 +40,7 @@ def score(m, items, device, bs=64):
         for r, (_, _, s, _) in enumerate(chunk):
             x[r, :len(s)] = torch.tensor(s)
         x = x.to(device)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.autocast(DEV, dtype=AMP):
             logits = m(x).float()
         lp = F.log_softmax(logits[:, :-1], -1)
         for r, (i, j, s, nc) in enumerate(chunk):
@@ -119,7 +123,7 @@ def needle_probe(m, val, device, n=200, ctx_len=900):
         mask_noise[T - len(query):] = False
         ans_mass.append(att[:, apos].sum(1).cpu().numpy())
         noise_mass.append(att[:, mask_noise].sum(1).cpu().numpy())
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.autocast(DEV, dtype=AMP):
             pred = m(idx)[0, -1].argmax().item()
         hits += int(pred == numtok[0])
     am, nm = np.mean(ans_mass, 0), np.mean(noise_mass, 0)
@@ -133,7 +137,7 @@ def main():
     ap.add_argument("--run", required=True)
     ap.add_argument("--data_dir", default="/data")
     a = ap.parse_args()
-    device = "cuda"
+    device = DEV
     m = load(a.run, device)
     out = {}
     for task in ("hellaswag", "arc_easy", "piqa", "lambada"):

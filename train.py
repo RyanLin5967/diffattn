@@ -16,7 +16,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from model import GPT, GPTConfig
 
-H100_BF16_PEAK = 989.5e12  # dense, SXM
+PEAK = {"H100": 989.5e12, "T4": 65e12, "A100": 312e12, "P100": 18.7e12, "cpu": 1e12}  # dense half-precision
+
+
+def peak_flops(name):
+    return next((v for k, v in PEAK.items() if k in name), float("nan"))
 
 
 def get_args():
@@ -41,6 +45,7 @@ def get_args():
     p.add_argument("--val_tokens", type=int, default=20_000_000)
     p.add_argument("--ckpt_every", type=int, default=2000)
     p.add_argument("--compile", type=int, default=1)
+    p.add_argument("--dtype", default="bf16", choices=["bf16", "fp16"])
     p.add_argument("--d_model", type=int, default=512)
     p.add_argument("--n_layer", type=int, default=8)
     p.add_argument("--n_head", type=int, default=8)
@@ -80,7 +85,7 @@ def lr_at(step, total, peak, warmup_frac, final_frac):
 
 
 @torch.no_grad()
-def evaluate(model, val, ntok, seq, micro_bs, rank, world, device):
+def evaluate(model, val, ntok, seq, micro_bs, rank, world, device, dev_type, amp_dtype):
     """Mean loss over the first ntok tokens of val.bin, trimmed to whole (world*micro_bs) batches so the
     compiled graph never sees a ragged batch. Returns (loss, n_windows_used)."""
     per = world * micro_bs
@@ -90,7 +95,7 @@ def evaluate(model, val, ntok, seq, micro_bs, rank, world, device):
     for i in range(0, len(mine), micro_bs):
         ws = mine[i:i + micro_bs]
         buf = torch.from_numpy(np.stack([val[w * seq:w * seq + seq + 1] for w in ws]).astype(np.int64)).to(device)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.autocast(dev_type, dtype=amp_dtype):
             loss = model(buf[:, :-1], buf[:, 1:])
         tot[0] += loss.double() * len(ws)
         tot[1] += len(ws)
@@ -103,13 +108,19 @@ def main():
     a = get_args()
     ddp = "RANK" in os.environ
     if ddp:
-        dist.init_process_group("nccl")
+        dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")
         rank, world = dist.get_rank(), dist.get_world_size()
     else:
         rank, world = 0, 1
     local = int(os.environ.get("LOCAL_RANK", 0))
-    device = f"cuda:{local}"
-    torch.cuda.set_device(device)
+    cuda = torch.cuda.is_available()
+    device = f"cuda:{local}" if cuda else "cpu"
+    if cuda:
+        torch.cuda.set_device(device)
+    dev_type = "cuda" if cuda else "cpu"
+    amp_dtype = torch.bfloat16 if a.dtype == "bf16" else torch.float16
+    gpu_name = torch.cuda.get_device_name() if cuda else "cpu"
+    peak = peak_flops(gpu_name)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
@@ -133,7 +144,8 @@ def main():
     decay = [p for n, p in model.named_parameters() if p.dim() >= 2]
     nodecay = [p for n, p in model.named_parameters() if p.dim() < 2]
     opt = torch.optim.AdamW([{"params": decay, "weight_decay": a.wd}, {"params": nodecay, "weight_decay": 0.0}],
-                            lr=a.lr, betas=(0.9, 0.95), eps=1e-8, fused=True)
+                            lr=a.lr, betas=(0.9, 0.95), eps=1e-8, fused=cuda)
+    scaler = torch.amp.GradScaler(dev_type, enabled=(a.dtype == "fp16"))
 
     os.makedirs(a.out, exist_ok=True)
     ck = os.path.join(a.out, "ckpt.pt")
@@ -142,6 +154,8 @@ def main():
         st = torch.load(ck, map_location=device)
         model.load_state_dict(st["model"])
         opt.load_state_dict(st["opt"])
+        if "scaler" in st:
+            scaler.load_state_dict(st["scaler"])
         step = st["step"]
         if rank == 0:
             print(f"resumed from step {step}", flush=True)
@@ -156,7 +170,7 @@ def main():
     if rank == 0:
         meta = dict(vars(a), resumed_from=step, n_params=n_params, flops_per_token=fpt, hw_flops_per_token=hwfpt, world=world,
                     accum=accum, max_steps=max_steps, schedule_steps=sched, pool_steps=pool_steps,
-                    train_tokens=max_steps * a.batch_tokens, gpu=torch.cuda.get_device_name(),
+                    train_tokens=max_steps * a.batch_tokens, gpu=gpu_name, peak_flops=peak,
                     torch=torch.__version__, shards=[os.path.basename(f) for f in data.files])
         json.dump(meta, open(os.path.join(a.out, f"meta_from{step}.json"), "w"), indent=1)
         print(json.dumps(meta)[:2000], flush=True)
@@ -180,12 +194,14 @@ def main():
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             if ddp:
                 model.require_backward_grad_sync = (m == accum - 1)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.autocast(dev_type, dtype=amp_dtype):
                 loss = model(x, y) / accum
-            loss.backward()
+            scaler.scale(loss).backward()
             loss_acc += loss.detach()
+        scaler.unscale_(opt)
         gn = torch.nn.utils.clip_grad_norm_(raw.parameters(), a.clip)
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
         opt.zero_grad(set_to_none=True)
         step += 1
         tok_since += a.batch_tokens
@@ -196,15 +212,16 @@ def main():
                 dist.all_reduce(loss_acc)
             train_loss = loss_acc.item() / (world * (step % a.log_every or a.log_every))
             loss_acc.zero_()
-            torch.cuda.synchronize()
+            if cuda:
+                torch.cuda.synchronize()
             dt = time.time() - t0
             tps = tok_since / dt
             full = last or step % a.val_full_every == 0
             vl, vwin = evaluate(cmodel, val, a.val_tokens if full else a.val_small_tokens, a.seq, a.micro_bs, rank,
-                          world, device)
+                              world, device, dev_type, amp_dtype)
             rec = dict(step=step, tokens=step * a.batch_tokens, lr=lr, train_loss=train_loss, grad_norm=gn.item(),
-                       tok_per_s=tps, mfu=tps * fpt / (world * H100_BF16_PEAK),
-                       hw_mfu=tps * hwfpt / (world * H100_BF16_PEAK), lambdas=raw.lambdas())
+                       tok_per_s=tps, mfu=tps * fpt / (world * peak),
+                       hw_mfu=tps * hwfpt / (world * peak), loss_scale=scaler.get_scale(), lambdas=raw.lambdas())
             rec["val_loss_full" if full else "val_loss_2m"] = vl
             rec["val_windows"] = vwin
             diverged = not math.isfinite(train_loss)
@@ -215,11 +232,11 @@ def main():
                 break
             t0, tok_since = time.time(), 0
         if rank == 0 and (step % a.ckpt_every == 0) and not last:
-            torch.save({"model": raw.state_dict(), "opt": opt.state_dict(), "step": step}, ck + ".tmp")
+            torch.save({"model": raw.state_dict(), "opt": opt.state_dict(), "scaler": scaler.state_dict(), "step": step}, ck + ".tmp")
             os.replace(ck + ".tmp", ck)
     if rank == 0 and not diverged and step < sched:
         # partial run (e.g. throughput pilot): leave a resumable checkpoint, do not mark DONE
-        torch.save({"model": raw.state_dict(), "opt": opt.state_dict(), "step": step}, ck + ".tmp")
+        torch.save({"model": raw.state_dict(), "opt": opt.state_dict(), "scaler": scaler.state_dict(), "step": step}, ck + ".tmp")
         os.replace(ck + ".tmp", ck)
         open(os.path.join(a.out, "PAUSED"), "w").write(str(step))
     elif rank == 0:

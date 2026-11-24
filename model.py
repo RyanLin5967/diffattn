@@ -189,7 +189,7 @@ class GPT(nn.Module):
         logits = F.linear(x, self.wte.weight)  # tied
         if targets is None:
             return logits
-        return F.cross_entropy(logits.float().view(-1, logits.size(-1)), targets.view(-1))
+        return F.cross_entropy(logits.float().reshape(-1, logits.size(-1)), targets.reshape(-1))
 
     def lambdas(self):
         if self.cfg.arch != "diff":
