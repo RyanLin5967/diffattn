@@ -177,19 +177,23 @@ def figures(by):
     fig, ax = plt.subplots(1, 2, figsize=(10, 3.6))
     col = dict(std="#888888", qknorm="#1f77b4", diff="#d62728")
     for a in ARMS:
-        curves = []
-        for r in by[a]:
-            pts = [(x["tokens"], x.get("val_loss_full", x.get("val_loss_2m"))) for x in r["log"]]
-            curves.append(pts)
-        n = min(len(c) for c in curves)
-        t = np.array([p[0] for p in curves[0][:n]]) / 1e6
-        y = np.array([[p[1] for p in c[:n]] for c in curves])
-        ax[0].plot(t, y.mean(0), color=col[a], label=a)
-        ax[0].fill_between(t, y.min(0), y.max(0), color=col[a], alpha=0.25)
+        # two different val sets are logged (2M-token prefix at most steps, full 10M set at val_full_every
+        # and the last step); never join them in one line
+        for key, style in (("val_loss_2m", "line"), ("val_loss_full", "marker")):
+            curves = [[(x["tokens"], x[key]) for x in r["log"] if key in x] for r in by[a]]
+            n = min(len(c) for c in curves)
+            t = np.array([p[0] for p in curves[0][:n]]) / 1e6
+            y = np.array([[p[1] for p in c[:n]] for c in curves])
+            if style == "line":
+                ax[0].plot(t, y.mean(0), color=col[a], label=f"{a} (2M-token val prefix)")
+                ax[0].fill_between(t, y.min(0), y.max(0), color=col[a], alpha=0.25)
+            else:
+                ax[0].errorbar(t, y.mean(0), yerr=y.std(0, ddof=1), fmt="o", ms=4, color=col[a], capsize=3,
+                               label=f"{a} (full 10M val, mean±sd)")
     ax[0].set_xlabel("tokens (M)")
     ax[0].set_ylabel("val loss")
     ax[0].set_ylim(None, np.nanmean([r["final_val"] for r in by["std"]]) + 0.6)
-    ax[0].legend()
+    ax[0].legend(fontsize=6)
     lam = np.array([[x["lambdas"] for x in r["log"]] for r in by["diff"]])  # seeds, logs, layers
     t = np.array([x["tokens"] for x in by["diff"][0]["log"]]) / 1e6
     for li in range(lam.shape[2]):
