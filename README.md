@@ -39,7 +39,9 @@ At 51M parameters / 118M tokens per run, the **standard baseline beat DiffAttn b
 [0.059, 0.119], Welch p = 5e-4) and beat QK-norm by 0.144 (p = 9e-9); DiffAttn beat QK-norm by 0.055
 (p = 0.005). With no DiffAttn gain, "how much does QK-norm recover" is undefined at this scale. DiffAttn
 did show the paper's mechanism: 3.2x higher attention share on the answer span in a retrieval probe.
-Main caveats: tiny scale and budget, and LRs tuned with one seed at 25% budget (QK-norm's 5e-4 sits on
-the edge of its grid). Full write-up: `paper/paper.md`.
+Scope: these hold with LRs chosen by the pre-registered single-seed, quarter-budget sweep, whose LR
+sensitivity is as large as the gaps; they do not show DiffAttn or QK-norm are worse when tuned at full
+budget, and the std-DiffAttn gap was still shrinking (0.114 at step 1000 -> 0.089 at step 1800).
+Results independently recomputed from the raw logs in a fresh context (all numbers confirmed). Full write-up: `paper/paper.md`.
 
 ![curves](analysis/curves.png)

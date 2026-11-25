@@ -85,3 +85,14 @@ Goal: test whether Differential Attention (Ye et al. 2024) still beats a standar
   still tripled attention share on the answer span in a retrieval probe."
 - Figure fix: the first curves.png joined two different val sets (2M prefix and full 10M) in one line,
   producing fake upticks; now plotted separately.
+- Fresh-context verification (own script, not analyze.py): all loss means/sds, Welch diffs/CIs/p,
+  sign-flip p, matching, needle shares CONFIRMED. Narrowed the claim: results hold for sweep-chosen LRs
+  only; sweep LR sensitivity (+0.13 to +0.30 per 2x for std/diff) and single-seed sweep noise (~0.15 for
+  qknorm) are as large as the effects; std-diff gap shrank 0.114 -> 0.089 from step 1000 to 1800.
+- Resume line, narrowed accordingly: "Ran a matched, pre-registered 3-arm x 5-seed replication of
+  Differential Attention (51M-param GPT, 118M tokens/run, free Kaggle T4s, $0): with sweep-tuned LRs the
+  standard baseline beat DiffAttn by 0.089 val loss (p=5e-4, all 5 seeds) and QK-norm by 0.144; DiffAttn
+  still tripled attention share on the answer span in a retrieval probe."
+- Not run: a full-budget LR check (2 seeds of qknorm/diff at extra LRs) suggested by the verifier. It is
+  outside the pre-registered protocol and would cost another multi-hour Kaggle session; the paper states
+  the open question instead.

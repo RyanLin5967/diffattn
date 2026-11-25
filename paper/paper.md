@@ -13,7 +13,9 @@ the lowest held-out loss**: 4.079 ± 0.010 vs 4.168 ± 0.024 for DiffAttn (diffe
 0.055 (p = 0.005). DiffAttn gave no gain for QK-norm to recover, so the recovery question is undefined at
 this scale. DiffAttn did reproduce the paper's mechanism signature: on a key-retrieval probe its
 final-position attention put 3.2x more of its (scale-free) mass on the answer span than the baselines did.
-We report these as small-scale, short-budget results and list why they may not transfer.
+These results hold for learning rates chosen by the pre-registered single-seed, quarter-budget sweep;
+they do not show that DiffAttn or QK-norm are worse when each is tuned at full budget, and the
+std-DiffAttn gap was still narrowing at the end of training.
 
 ## 1 Introduction
 Differential Attention (DiffAttn; Ye et al., 2024) replaces softmax attention with the difference of two
@@ -112,6 +114,17 @@ better retrieval or lower loss here.
   horizon, and QK-norm's choice (5e-4) sits on the edge of the extended grid, so QK-norm in particular may
   be under-tuned for the full budget; QK-norm is usually paired with higher LRs. The QK-norm result is the
   least robust conclusion here.
+- Sweep sensitivity is as large as the effects. At 450 steps a factor-2 LR change moved loss by +0.13 to
+  +0.30 for std and DiffAttn (+0.017 for QK-norm), and QK-norm's single-seed grid is non-monotonic by 0.15,
+  which bounds sweep noise at roughly the size of the main-run gaps. A parabola fit in log2(LR) through
+  each arm's three best sweep points puts the interpolated optimum within 0.014 of the chosen LR at 450
+  steps, but the full-budget (1800-step) optimum was never measured.
+- The gaps are budget-dependent: std − diff shrank from 0.114 (step 1000) to 0.089 (step 1800); std −
+  qknorm grew from 0.136 to 0.144. Longer training could change the DiffAttn comparison.
+- QK-norm uses unit-RMS q, k with learnable gains initialised at 1 and the default 1/sqrt(64) scale, which
+  bounds early attention logits (|logit| <= 8); this may handicap QK-norm at low LR (untested).
+- Seed 4 ran in a different Kaggle session for diff than for std and qknorm (same GPU type, torch version
+  and code); seeds 0-3 were split by session with all three arms of a seed in the same session.
 - One dataset (FineWeb-Edu), one tokenizer, one context length.
 - Five seeds: the exact paired sign-flip test cannot reach p < 0.05 (minimum two-sided p = 0.0625).
 - fp16 on T4 rather than bf16; DiffAttn costs 1.5x attention FLOPs per token, so the comparison is
