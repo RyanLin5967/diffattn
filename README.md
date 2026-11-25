@@ -27,4 +27,19 @@ every deviation from the original 350M/10B-token design and why.
 - `analysis/analyze.py` — pre-registered analysis (tables, tests, MDE, figures).
 - `tests/` — unit tests (lambda=0 reduces to standard attention, match against a naive reference, shapes, param matching, gradcheck, causality) and a GPU kernel-parity check.
 
-Status: in progress. Results will be added from logged runs only.
+## Result (15 main runs, all finished; raw logs in `runs/`, analysis in `analysis/results.json`)
+
+| arm | final val loss (5 seeds) | LR (from sweep) |
+|---|---|---|
+| std | **4.0787 ± 0.0096** | 1e-3 |
+| qknorm | 4.2231 ± 0.0081 | 5e-4 |
+| diff | 4.1677 ± 0.0242 | 1e-3 |
+
+At 51M parameters / 118M tokens per run, the **standard baseline beat DiffAttn by 0.089** (95% CI
+[0.059, 0.119], Welch p = 5e-4) and beat QK-norm by 0.144 (p = 9e-9); DiffAttn beat QK-norm by 0.055
+(p = 0.005). With no DiffAttn gain, "how much does QK-norm recover" is undefined at this scale. DiffAttn
+did show the paper's mechanism: 3.2x higher attention share on the answer span in a retrieval probe.
+Main caveats: tiny scale and budget, and LRs tuned with one seed at 25% budget (QK-norm's 5e-4 sits on
+the edge of its grid). Full write-up: `paper/paper.md`.
+
+![curves](analysis/curves.png)

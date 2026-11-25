@@ -73,3 +73,15 @@ Goal: test whether Differential Attention (Ye et al. 2024) still beats a standar
   Kaggle allows 2 concurrent GPU sessions per account and another project's kernels held both slots,
   so the pushes are queued and retried until a slot frees. The weekly free GPU quota is shared with
   that project (remaining quota is not visible through the API).
+
+## 2026-11-24 — main results (raw: runs/main/, analysis: analysis/results.json)
+- All 15 main runs finished 1800 steps, none diverged, no fp16 skipped steps, all evals rc 0.
+- std 4.0787±0.0096 < diff 4.1677±0.0242 < qknorm 4.2231±0.0081 (final full val). DiffAttn gain over
+  std is negative (-0.089, Welch p=5e-4), so the pre-registered recovery ratio is not meaningful.
+- The spec's target resume line ("QK-norm recovers X% of DiffAttn's gain") is not supported at this
+  scale. Supported line (measured): "Ran a matched, pre-registered 3-arm x 5-seed replication of
+  Differential Attention on a 51M-param GPT (118M tokens/run, free Kaggle T4s): at this scale the
+  standard baseline beat DiffAttn by 0.089 val loss (p=5e-4) and QK-norm by 0.144, while DiffAttn
+  still tripled attention share on the answer span in a retrieval probe."
+- Figure fix: the first curves.png joined two different val sets (2M prefix and full 10M) in one line,
+  producing fake upticks; now plotted separately.
